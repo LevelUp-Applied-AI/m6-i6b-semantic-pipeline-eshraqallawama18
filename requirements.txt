@@ -5,3 +5,4 @@ spacy
 pandas
 numpy<2
 pytest
+click
