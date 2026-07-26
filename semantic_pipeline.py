@@ -9,128 +9,177 @@ article corpus.
 import numpy as np
 import pandas as pd
 import spacy
+import torch
 
+from sklearn.metrics.pairwise import cosine_similarity
 
 def load_and_preprocess(filepath):
-    """Load the climate articles dataset and prepare texts for processing.
+    """Load the climate articles dataset and prepare texts for processing."""
 
-    Args:
-        filepath: Path to the CSV file (e.g., 'data/climate_articles.csv').
+    df = pd.read_csv(filepath)
 
-    Returns:
-        pandas DataFrame with at least columns: 'text', plus any
-        preprocessing columns you add (e.g., cleaned text).
-    """
-    # TODO: Load the CSV, handle missing values, ensure text column is clean
-    pass
+    df = df.dropna(subset=["text"])
+
+    df["text"] = df["text"].astype(str)
+
+    if "language" in df.columns:
+        df = df[df["language"] == "en"]
+
+    df = df.reset_index(drop=True)
+
+    return df
 
 
 def run_ner(texts):
-    """Run named entity recognition on a list of texts using spaCy.
 
-    Args:
-        texts: List of strings to process.
+    nlp = spacy.load("en_core_web_sm")
 
-    Returns:
-        pandas DataFrame with columns: 'text_index', 'entity_text',
-        'entity_label'. Each row is one extracted entity.
-    """
-    # TODO: Load a spaCy model, process each text, extract entities,
-    #       and collect into a DataFrame
-    pass
+    entities = []
 
+    for index, text in enumerate(texts):
+
+        doc = nlp(text)
+
+        for ent in doc.ents:
+            entities.append(
+                {
+                    "text_index": index,
+                    "entity_text": ent.text,
+                    "entity_label": ent.label_
+                }
+            )
+
+    return pd.DataFrame(
+        entities,
+        columns=[
+            "text_index",
+            "entity_text",
+            "entity_label"
+        ]
+    )
 
 def compute_embeddings(texts, tokenizer, model):
-    """Compute DistilBERT embeddings for a list of texts.
 
-    Tokenize each text, pass through the model, and mean-pool the
-    last hidden state to produce a single vector per text.
+    embeddings = []
 
-    Args:
-        texts: List of strings.
-        tokenizer: Hugging Face tokenizer.
-        model: Hugging Face model.
+    model.eval()
 
-    Returns:
-        numpy array of shape (n_texts, 768).
-    """
-    import torch
-    # TODO: Iterate over texts, tokenize with padding/truncation,
-    #       run model forward pass (with torch.no_grad()), mean-pool hidden states
-    pass
+    with torch.no_grad():
 
+        for text in texts:
+
+            inputs = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=512
+            )
+
+            outputs = model(**inputs)
+
+            hidden = outputs.last_hidden_state
+
+            embedding = hidden.mean(dim=1)
+
+            embeddings.append(
+                embedding.squeeze().numpy()
+            )
+
+    return np.array(embeddings)
 
 def semantic_search(query, corpus_embeddings, corpus_texts, top_k=5):
-    """Find the top-k most similar texts to the query using cosine similarity.
 
-    Args:
-        query: numpy array of shape (768,) — the query embedding.
-        corpus_embeddings: numpy array of shape (n, 768) — corpus embeddings.
-        corpus_texts: List of strings — the original texts.
-        top_k: Number of results to return.
+    scores = cosine_similarity(
+        query.reshape(1, -1),
+        corpus_embeddings
+    )[0]
 
-    Returns:
-        List of (text, similarity_score) tuples, sorted by similarity descending.
-    """
-    # TODO: Compute cosine similarity between query and all corpus embeddings,
-    #       sort by similarity, return top-k results
-    pass
 
+    indices = np.argsort(scores)[::-1][:top_k]
+
+
+    results = []
+
+    for i in indices:
+        results.append(
+            (
+                corpus_texts[i],
+                float(scores[i])
+            )
+        )
+
+    return results
 
 def enrich_with_entities(search_results, entity_df, corpus_texts):
-    """Enrich semantic search results with NER entities.
 
-    For each search result, look up its position in corpus_texts to get the
-    text_index, then attach the matching entities from entity_df.
+    enriched = []
 
-    Args:
-        search_results: List of (text, score) tuples from semantic_search.
-        entity_df: DataFrame from run_ner with columns:
-                   'text_index', 'entity_text', 'entity_label'.
-        corpus_texts: List of strings — the original corpus passed to
-                      run_ner. Used to map a result text to its text_index.
+    for text, score in search_results:
 
-    Returns:
-        List of dictionaries, each with keys:
-        'text', 'similarity', 'entities' (list of {'text': ..., 'label': ...}).
-    """
-    # TODO: For each (text, score) in search_results, find the text's
-    #       position in corpus_texts (this is the text_index).
-    # TODO: Filter entity_df to rows where text_index matches, then build
-    #       a list of {'text': entity_text, 'label': entity_label} dicts.
-    # TODO: Return one dict per search result with keys text, similarity,
-    #       entities.
-    pass
+        index = corpus_texts.index(text)
 
+        rows = entity_df[
+            entity_df["text_index"] == index
+        ]
+
+        entities = []
+
+        for _, row in rows.iterrows():
+            entities.append(
+                {
+                    "text": row["entity_text"],
+                    "label": row["entity_label"]
+                }
+            )
+
+
+        enriched.append(
+            {
+                "text": text,
+                "similarity": score,
+                "entities": entities
+            }
+        )
+
+
+    return enriched
 
 def demonstrate_pipeline(corpus_df, entity_df, embeddings, queries,
                          tokenizer, model):
-    """Run the full pipeline demonstration on example queries.
 
-    For each query string:
-    1. Compute the query embedding (using the injected tokenizer and model)
-    2. Perform semantic search against the corpus embeddings
-    3. Enrich results with entities
+    results = {}
 
-    Args:
-        corpus_df: DataFrame from load_and_preprocess.
-        entity_df: DataFrame from run_ner.
-        embeddings: numpy array of shape (n, 768) from compute_embeddings.
-        queries: List of query strings.
-        tokenizer: Hugging Face tokenizer (already loaded by the caller).
-        model: Hugging Face model in eval mode (already loaded by the caller).
+    corpus_texts = corpus_df["text"].tolist()
 
-    Returns:
-        Dictionary mapping each query string to its enriched results list.
-    """
-    # TODO: For each query, compute the query embedding by calling
-    #       compute_embeddings([query], tokenizer, model)[0].
-    # TODO: Call semantic_search with the query embedding and the corpus.
-    # TODO: Call enrich_with_entities, passing corpus_df['text'].tolist()
-    #       as corpus_texts.
-    # TODO: Collect into a dict keyed by the query string and return it.
-    pass
 
+    for query in queries:
+
+        query_embedding = compute_embeddings(
+            [query],
+            tokenizer,
+            model
+        )[0]
+
+
+        search_results = semantic_search(
+            query_embedding,
+            embeddings,
+            corpus_texts
+        )
+
+
+        enriched = enrich_with_entities(
+            search_results,
+            entity_df,
+            corpus_texts
+        )
+
+
+        results[query] = enriched
+
+
+    return results
 
 if __name__ == "__main__":
     from transformers import AutoTokenizer, AutoModel
